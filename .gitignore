@@ -1,0 +1,56 @@
+# 预训练模型文件（从 HuggingFace 下载）
+models/
+
+# 训练输出（checkpoints、日志、曲线图）
+output/
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# 环境和 IDE
+.env
+.venv/
+env/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 模型权重文件（防止在其他目录散落）
+*.pth
+*.pt
+*.bin
+*.safetensors
+*.onnx
+*.h5
+*.ckpt
+*.pkl
+
+# Numpy 缓存
+*.npy
+*.npz
+
+# 训练数据 / 特征缓存
+*.csv
+*.tsv
+
+# 日志
+*.log
+logs/
+
+# Wandb / MLflow
+wandb/
+mlruns/
+
+# Jupyter
+.ipynb_checkpoints/

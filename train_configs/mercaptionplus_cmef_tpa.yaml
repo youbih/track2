@@ -1,0 +1,146 @@
+## Stage 2: MERCaptionPlus (train/val) + Human (test)
+## TPA + CMEF Innovative Architecture
+##
+## Quick:   --options datasets.mercaptionplus.ratio=0.3 run.iters_per_epoch=1000 run.max_epoch=10 run.warmup_steps=500 run.batch_size_train=1 run.batch_size_eval=1
+## Half:    --options datasets.mercaptionplus.ratio=0.5 run.iters_per_epoch=2000 run.max_epoch=20 run.warmup_steps=1000 run.batch_size_train=1 run.batch_size_eval=1
+## Full:    --options datasets.mercaptionplus.ratio=1.0 run.iters_per_epoch=5000 run.max_epoch=20 run.warmup_steps=2000 run.batch_size_train=1 run.batch_size_eval=1
+
+model:
+  arch: affectgpt
+  model_type: pretrain_vicuna
+
+  frozen_video_proj: False
+  frozen_video_Qformer: True
+  frozen_audio_Qformer: True
+  frozen_audio_proj: False
+  frozen_multi_Qformer: True
+  frozen_multi_llama_proj: False
+  frozen_llm: False
+
+  audio_fusion_type: tpa
+  video_fusion_type: tpa
+  multi_fusion_type: cmef
+  image_fusion_type: mean
+
+  tpa_num_heads: 8
+  tpa_dropout: 0.1
+  cmef_num_heads: 8
+  cmef_num_layers: 2
+  cmef_dropout: 0.1
+
+  ckpt:   ""
+  ckpt_2: ""
+
+  llama_model: "Qwen25"
+  acoustic_encoder: "HUBERT_LARGE"
+  visual_encoder: "CLIP_VIT_LARGE"
+
+  num_audio_query_token: 4
+  num_video_query_token: 4
+  num_multi_query_token: 4
+  num_image_query_token: 1
+
+  max_length: 512
+
+  vis_processor:
+    train:
+      name: "alpro_video_train"
+      n_frms: 8
+      image_size: 224
+  text_processor:
+    train:
+      name: "blip_caption"
+  img_processor:
+    train:
+      name: "blip2_image_train"
+      image_size: 224
+
+
+datasets:
+
+  mercaptionplus:
+    data_type: video
+    face_or_frame: 'frame'
+    label_type: 'ovlabel'
+    split_role: 'train'
+    enable_val_split: true
+    val_ratio: 0.1
+    split_seed: 42
+    ratio: 0.5
+    train_monitor_ratio: 0.02
+
+  human:
+    data_type: video
+    face_or_frame: 'frame'
+    label_type: 'ovlabel'
+    split_role: 'test'
+
+
+run:
+
+  task: video_text_pretrain
+
+  lr_sched: "linear_warmup_cosine_lr"
+  init_lr: 1e-5
+  min_lr: 1e-6
+  warmup_lr: 1e-6
+  weight_decay: 0.05
+
+  max_epoch: 15
+  iters_per_epoch: 2000
+  warmup_steps: 1000
+
+  batch_size_train: 1
+  batch_size_eval:  1
+
+  seed: 42
+  num_workers: 4
+
+  amp: True
+  resume_ckpt_path: null
+
+  evaluate: False
+  train_splits: ["train"]
+  monitor_splits: ["train_monitor"]
+  valid_splits: ["val"]
+  test_splits: ["test"]
+  val_freq: 2
+  early_stop_patience: 5
+  metric_max_new_tokens: 128
+  metric_max_samples_by_split:
+    train_monitor: 100
+    val: 200
+    test: 300
+
+  device: "cuda"
+  world_size: 1
+  dist_url: "env://"
+  distributed: True
+
+
+inference:
+
+  task: video_text_pretrain
+
+  vis_processor:
+    train:
+      name: "alpro_video_eval"
+      n_frms: 8
+      image_size: 224
+  text_processor:
+    train:
+      name: "blip_caption"
+  img_processor:
+    train:
+      name: "blip2_image_eval"
+      image_size: 224
+
+  face_or_frame: 'xxx'
+
+  base_root: 'output/results'
+  ckpt_root: xxx
+  ckpt_name: xxx
+  test_epoch: xxx
+  test_epochs: xxx-xxx
+  skip_epoch: 1
+  gpu: 0
