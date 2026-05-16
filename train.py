@@ -81,5 +81,8 @@ def main():
     )
     runner.train()
 
+    if cfg.run_cfg.distributed:
+        torch.distributed.destroy_process_group()
+
 if __name__ == "__main__":
     main()
