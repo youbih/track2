@@ -135,9 +135,33 @@ class BaseTask:
             # if using iter-based runner, we stop after iters_per_epoch iterations.
             if i >= iters_per_epoch:
                 break
-            
-            samples = next(data_loader)
-            samples = prepare_sample(samples, cuda_enabled=cuda_enabled) # move all samples-tensor into cuda
+
+            # DataLoader timeout retry
+            for _attempt in range(3):
+                try:
+                    samples = next(data_loader)
+                    break
+                except RuntimeError as e:
+                    err_msg = str(e).lower()
+                    if "timed out" in err_msg or "timeout" in err_msg:
+                        logging.warning("DataLoader timeout at epoch %d iter %d, retry (%d/3)", epoch, i, _attempt + 1)
+                        import gc; gc.collect(); torch.cuda.empty_cache()
+                        continue
+                    raise
+            else:
+                raise RuntimeError(f"DataLoader timed out 3 times at epoch {epoch} iter {i}")
+
+            try:
+                samples = prepare_sample(samples, cuda_enabled=cuda_enabled) # move all samples-tensor into cuda
+            except RuntimeError as e:
+                if "out of memory" in str(e).lower():
+                    logging.warning("CUDA OOM at epoch %d iter %d, skipping batch", epoch, i)
+                    torch.cuda.empty_cache()
+                    if scaler: scaler.update()
+                    optimizer.zero_grad(set_to_none=True)
+                    continue
+                raise
+
             samples.update( # add new key-value into map
                 {
                     "epoch": inner_epoch,
@@ -149,14 +173,23 @@ class BaseTask:
             lr_scheduler.step(cur_epoch=inner_epoch, cur_step=i)
 
             # (amp, scaler) for amp training [不同版本下，调用的方式存在差别]
-            if torch.__version__.startswith('2.4.0') or torch.__version__.startswith('2.6.0'):
-                with torch.amp.autocast('cuda', enabled=use_amp):
-                    loss = self.train_step(model=model, samples=samples)
-            elif torch.__version__.startswith('2.1.0'):
-                with torch.cuda.amp.autocast(enabled=use_amp):
-                    loss = self.train_step(model=model, samples=samples)
-            else:
-                assert 1==0, f'unsupport torch version'
+            try:
+                if torch.__version__.startswith('2.4.0') or torch.__version__.startswith('2.6.0'):
+                    with torch.amp.autocast('cuda', enabled=use_amp):
+                        loss = self.train_step(model=model, samples=samples)
+                elif torch.__version__.startswith('2.1.0'):
+                    with torch.cuda.amp.autocast(enabled=use_amp):
+                        loss = self.train_step(model=model, samples=samples)
+                else:
+                    assert 1==0, f'unsupport torch version'
+            except RuntimeError as e:
+                if "out of memory" in str(e).lower():
+                    logging.warning("CUDA OOM in forward at epoch %d iter %d, skipping batch", epoch, i)
+                    torch.cuda.empty_cache()
+                    if scaler: scaler.update()
+                    optimizer.zero_grad(set_to_none=True)
+                    continue
+                raise
 
             if use_amp:
                 scaler.scale(loss).backward()
@@ -167,8 +200,8 @@ class BaseTask:
             if (i + 1) % accum_grad_iters == 0:
                 if use_amp:
                     scaler.step(optimizer)
-                    scaler.update()                     
-                else:    
+                    scaler.update()
+                else:
                     optimizer.step()
                 optimizer.zero_grad()
 

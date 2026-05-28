@@ -32,7 +32,7 @@ from my_affectgpt.datasets.datasets.dataloader_utils import (
     PrefetchLoader,
 )
 
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader, DistributedSampler, ConcatDataset
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 @registry.register_runner("runner_base")
@@ -115,16 +115,31 @@ class RunnerBase:
             ## weight decay 表示正则项系数，防止模型过拟合
             num_parameters = 0
             p_wd, p_non_wd = [], []
+            param_names = []
             for n, p in self.model.named_parameters():
                 if not p.requires_grad:
                     continue  # frozen weights
-                print(n)
-                if p.ndim < 2 or "bias" in n or "ln" in n or "bn" in n:
+                param_names.append(n)
+                # No weight decay for: bias, 1D params (LN weight, embedding),
+                # and normalization layer weights.
+                # Use precise suffix matching to avoid false positives like
+                # "audio_bias_proj.weight" being treated as bias.
+                no_wd = (
+                    p.ndim < 2
+                    or n.endswith(".bias")
+                    or n.endswith(".norm.weight")
+                    or n.endswith(".ln.weight")
+                    or n.endswith(".bn.weight")
+                    or "layer_norm" in n.lower()
+                    or "batch_norm" in n.lower()
+                )
+                if no_wd:
                     p_non_wd.append(p)
                 else:
                     p_wd.append(p)
                 num_parameters += p.data.nelement()
             logging.info("number of trainable parameters: %d" % num_parameters)
+            logging.debug("trainable param names (first 10): %s", param_names[:10])
             optim_params = [
                 {"params": p_wd,     "weight_decay": float(self.config.run_cfg.weight_decay)},
                 {"params": p_non_wd, "weight_decay": 0},
@@ -530,6 +545,9 @@ class RunnerBase:
                         eval_splits.append(split_name)
 
             if len(eval_splits) > 0:
+                # Free GPU cache before eval to reduce OOM risk
+                import gc; gc.collect(); torch.cuda.empty_cache()
+
                 improved_on_val = False
                 for split_name in eval_splits:
                     logging.info("Evaluating on {}.".format(split_name))
@@ -579,12 +597,39 @@ class RunnerBase:
             if self.evaluate_only:
                 break
 
+            # Free GPU cache after eval to reduce OOM risk for next training epoch
+            import gc; gc.collect(); torch.cuda.empty_cache()
+
             if self.config.run_cfg.distributed:
                 dist.barrier()
 
         # testing phase
         test_epoch = "best" if len(self.valid_splits) > 0 and best_epoch > 0 else cur_epoch
-        self.evaluate(cur_epoch=test_epoch, skip_reload=self.evaluate_only)
+
+        # Free training memory before final evaluation to prevent OOM
+        import gc
+        if self._optimizer is not None:
+            self._optimizer.zero_grad(set_to_none=True)
+            self._optimizer = None
+        self._scaler = None
+        self._lr_sched = None
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        logging.info("Optimizer and scheduler freed. Starting test evaluation.")
+
+        if self.config.run_cfg.distributed:
+            dist.barrier()
+
+        try:
+            self.evaluate(cur_epoch=test_epoch, skip_reload=self.evaluate_only)
+        except Exception as e:
+            logging.warning("Test evaluation failed: {}. Training results are still saved.".format(e))
+            if self.config.run_cfg.distributed:
+                try:
+                    dist.barrier()
+                except Exception:
+                    pass
         self.save_history()
         self.save_training_plot()
 
@@ -592,18 +637,76 @@ class RunnerBase:
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))
         logging.info("Training time {}".format(total_time_str))
 
-    # evaluate for test_splits
+    # evaluate for test_splits (single-rank to avoid distributed deadlock)
     def evaluate(self, cur_epoch="best", skip_reload=False):
         test_logs = dict()
 
         if len(self.test_splits) > 0:
+            if not is_main_process():
+                # non-main ranks wait for rank 0 to finish test evaluation
+                if self.config.run_cfg.distributed:
+                    dist.barrier()
+                return test_logs
+
+            # When evaluate_only=True, self.dataloaders is never accessed,
+            # so reorg_datasets_by_split never runs. Ensure it here.
             for split_name in self.test_splits:
-                test_logs[split_name] = self.eval_epoch(
-                    split_name=split_name, cur_epoch=cur_epoch, skip_reload=skip_reload
+                if split_name not in self.datasets:
+                    from my_affectgpt.datasets.data_utils import reorg_datasets_by_split
+                    self.datasets = reorg_datasets_by_split(self.datasets)
+                    break
+
+            for split_name in self.test_splits:
+                # create non-distributed dataloader so rank 0 sees full test set
+                dataset = self.datasets[split_name]
+                if isinstance(dataset, (list, tuple)):
+                    dataset = dataset[0]
+                collate_fn = getattr(dataset, "collater", None)
+                if collate_fn is None:
+                    from my_affectgpt.datasets.datasets.base_dataset import collate_fn as default_collate
+                    collate_fn = default_collate
+
+                data_loader = DataLoader(
+                    dataset,
+                    batch_size=self.config.run_cfg.batch_size_eval,
+                    num_workers=self.config.run_cfg.num_workers,
+                    pin_memory=True,
+                    shuffle=False,
+                    collate_fn=collate_fn,
+                    drop_last=False,
                 )
-                if test_logs[split_name] is not None:
+                data_loader = PrefetchLoader(data_loader)
+
+                total_samples = len(dataset)
+                logging.info("=" * 60)
+                logging.info("TEST EVALUATION START (single-rank): split=%s, total_samples=%d", split_name, total_samples)
+                logging.info("=" * 60)
+
+                model = self.unwrap_dist_model(self.model)
+                if not skip_reload and cur_epoch == "best":
+                    model = self._reload_best_model(model, skip_barrier=True)
+                model.eval()
+
+                self.task.before_evaluation(model=model, dataset=dataset)
+                results = self.task.evaluation(
+                    model, data_loader,
+                    cuda_enabled=self.cuda_enabled,
+                    split_name=split_name, runner=self,
+                )
+
+                if results is not None:
+                    test_logs[split_name] = self.task.after_evaluation(
+                        val_result=results, split_name=split_name, epoch=cur_epoch,
+                    )
+
+                logging.info("TEST EVALUATION DONE: split=%s", split_name)
+                if test_logs.get(split_name) is not None:
                     self.log_stats(test_logs[split_name], split_name)
                     self.update_history(split_name, cur_epoch if isinstance(cur_epoch, int) else self.max_epoch, test_logs[split_name])
+
+            # sync all ranks after test evaluation
+            if self.config.run_cfg.distributed:
+                dist.barrier()
 
             return test_logs
 
@@ -655,6 +758,9 @@ class RunnerBase:
             split_name=split_name,
             runner=self,
         )
+
+        if self.config.run_cfg.distributed:
+            dist.barrier()
 
         if results is not None:
             return self.task.after_evaluation(
@@ -721,6 +827,8 @@ class RunnerBase:
                     shuffle=sampler is None and is_train, # 默认是 False，因为已经在 sampler 内部采样了
                     collate_fn=collate_fn,
                     drop_last=True if is_train else False,
+                    timeout=300 if is_train else 0,
+                    persistent_workers=num_workers > 0,
                 )
                 loader = PrefetchLoader(loader)
 
@@ -743,15 +851,22 @@ class RunnerBase:
                     collate_fn = collate_fn[0]
 
             if isinstance(dataset, list) or isinstance(dataset, tuple):
-                if hasattr(dataset[0], 'sample_ratio') and dataset_ratios is None:
-                    dataset_ratios = [d.sample_ratio for d in dataset]
-                loader = MultiIterLoader(
-                    loaders=[
-                        _create_loader(d, num_workers, bsz, is_train, collate_fn[i])
-                        for i, d in enumerate(dataset)
-                    ],
-                    ratios=dataset_ratios,
-                )
+                if is_train:
+                    if hasattr(dataset[0], 'sample_ratio') and dataset_ratios is None:
+                        dataset_ratios = [d.sample_ratio for d in dataset]
+                    loader = MultiIterLoader(
+                        loaders=[
+                            _create_loader(d, num_workers, bsz, is_train, collate_fn[i])
+                            for i, d in enumerate(dataset)
+                        ],
+                        ratios=dataset_ratios,
+                    )
+                else:
+                    # Non-train splits (val, test, train_monitor): concatenate datasets
+                    # instead of MultiIterLoader, since we need to evaluate on all data
+                    dataset = ConcatDataset(dataset)
+                    collate_fn = collate_fn[0] if isinstance(collate_fn, (list, tuple)) else collate_fn
+                    loader = _create_loader(dataset, num_workers, bsz, is_train, collate_fn)
             else:
                 loader = _create_loader(dataset, num_workers, bsz, is_train, collate_fn)
 
@@ -809,14 +924,19 @@ class RunnerBase:
         # model_no_ddp.llama_tokenizer.save_pretrained(save_to)
 
 
-    def _reload_best_model(self, model):
+    def _reload_best_model(self, model, skip_barrier=False):
         """
         Load the best checkpoint for evaluation.
         """
+        import gc
         checkpoint_path = os.path.join(self.output_dir, "checkpoint_best.pth")
 
         logging.info("Loading checkpoint from {}.".format(checkpoint_path))
         checkpoint = torch.load(checkpoint_path, map_location="cpu")
+
+        gc.collect()
+        torch.cuda.empty_cache()
+
         try:
             model.load_state_dict(checkpoint["model"])
         except RuntimeError:
@@ -827,6 +947,14 @@ class RunnerBase:
                 """
             )
             model.load_state_dict(checkpoint["model"], strict=False)
+
+        del checkpoint
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        if self.config.run_cfg.distributed and not skip_barrier:
+            dist.barrier()
+
         return model
 
     def _load_checkpoint(self, url_or_filename):
@@ -844,7 +972,12 @@ class RunnerBase:
             raise RuntimeError("checkpoint url or path is invalid")
 
         state_dict = checkpoint["model"]
-        self.unwrap_dist_model(self.model).load_state_dict(state_dict)
+        model = self.unwrap_dist_model(self.model)
+        # Use _load_matched_state_dict for consistency with initial loading
+        if hasattr(model, '_load_matched_state_dict'):
+            model._load_matched_state_dict(model, state_dict)
+        else:
+            model.load_state_dict(state_dict, strict=False)
 
         self.optimizer.load_state_dict(checkpoint["optimizer"])
         if self.scaler and "scaler" in checkpoint:

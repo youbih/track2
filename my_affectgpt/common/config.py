@@ -38,65 +38,50 @@ class Config:
         return [(opt + "=" + value) for opt, value in zip(opts[0::2], opts[1::2])]
     
     @staticmethod
-    def build_runner_config(cfg_path, **kwargs):
-        config = OmegaConf.load(cfg_path) # './xxx/xxx/multimodal_llama_stage3_finetune.yaml'
-        output_dir = os.path.basename(cfg_path).rsplit('.', 1)[0]
-        output_dir = os.path.join('output', output_dir)
-        config.run.output_dir = output_dir # output/multimodal_llama_stage3_finetune
+    def _build_subconfig(cfg_path, key, **kwargs):
+        """Generic helper to extract and merge a top-level config section.
 
-        model_config = OmegaConf.create()
-        if "run" in kwargs:
-            model_config = OmegaConf.merge(
-                model_config,
-                {"run": config['run']},
-                {"run": kwargs['run']}
+        Args:
+            cfg_path: Path to the YAML config file.
+            key: Top-level key to extract (e.g., 'run', 'model', 'inference').
+            **kwargs: Optional user overrides from command line.
+        Returns:
+            OmegaConf object containing the merged config section.
+        """
+        config = OmegaConf.load(cfg_path)
+        section = config.get(key, None)
+        assert section is not None, f"Missing {key} configuration in {cfg_path}."
+
+        section_config = OmegaConf.create()
+        if key in kwargs:
+            section_config = OmegaConf.merge(
+                section_config,
+                {key: section},
+                {key: kwargs[key]}
             )
         else:
-            model_config = OmegaConf.merge(
-                model_config,
-                {"run": config['run']}
+            section_config = OmegaConf.merge(
+                section_config,
+                {key: section}
             )
-        return model_config
+        return section_config
+
+    @staticmethod
+    def build_runner_config(cfg_path, **kwargs):
+        config = OmegaConf.load(cfg_path)
+        # Only set default output_dir when not explicitly specified in YAML
+        if not config.run.get("output_dir", None):
+            output_dir = os.path.basename(cfg_path).rsplit('.', 1)[0]
+            config.run.output_dir = os.path.join('output', output_dir)
+        return Config._build_subconfig(cfg_path, "run", **kwargs)
 
     @staticmethod
     def build_model_config(cfg_path, **kwargs):
-        config = OmegaConf.load(cfg_path)
-        model = config.get("model", None)
-        assert model is not None, "Missing model configuration file."
+        return Config._build_subconfig(cfg_path, "model", **kwargs)
 
-        model_config = OmegaConf.create()
-        if "model" in kwargs:
-            model_config = OmegaConf.merge(
-                model_config,
-                {"model": config["model"]},      
-                {"model": kwargs["model"]}
-            )
-        else:
-            model_config = OmegaConf.merge(
-                model_config,
-                {"model": config["model"]}
-            )
-        return model_config
-    
     @staticmethod
     def build_inference_config(cfg_path, **kwargs):
-        config = OmegaConf.load(cfg_path)
-        inference = config.get("inference", None)
-        assert inference is not None, "Missing inference configuration file."
-
-        inference_config = OmegaConf.create()
-        if "inference" in kwargs:
-            inference_config = OmegaConf.merge(
-                inference_config,
-                {"inference": config["inference"]},      
-                {"inference": kwargs["inference"]}
-            )
-        else:
-            inference_config = OmegaConf.merge(
-                inference_config,
-                {"inference": config["inference"]}
-            )
-        return inference_config
+        return Config._build_subconfig(cfg_path, "inference", **kwargs)
 
     @staticmethod
     def build_dataset_config(cfg_path, **kwargs):
@@ -105,12 +90,12 @@ class Config:
         assert datasets is not None, "Missing datasets configuration file."
 
         dataset_config = OmegaConf.create()
-        for dataset_name in datasets: # yaml 里的每个数据集处理一下
+        for dataset_name in datasets:
             temp_config = OmegaConf.create()
             if "datasets" in kwargs and dataset_name in kwargs["datasets"]:
                 temp_config = OmegaConf.merge(
                     temp_config,
-                    {dataset_name: config["datasets"][dataset_name]},      
+                    {dataset_name: config["datasets"][dataset_name]},
                     {dataset_name: kwargs["datasets"][dataset_name]}
                 )
             else:
@@ -118,8 +103,6 @@ class Config:
                     temp_config,
                     {dataset_name: config["datasets"][dataset_name]}
                 )
-
-            # global merge
             dataset_config = OmegaConf.merge(
                 dataset_config,
                 {"datasets": temp_config},

@@ -1,5 +1,4 @@
 import re
-import copy
 import dataclasses
 from enum import auto, Enum
 from typing import List, Tuple, Any
@@ -192,7 +191,7 @@ class Chat:
         if video_hiddens is None or audio_hiddens is None:
             return None, None
 
-        multi_hiddens, multi_llms = self.model.encode_multi_merge(video_hiddens, audio_hiddens)
+        multi_hiddens, multi_llms, _, _ = self.model.encode_multi_merge(video_hiddens, audio_hiddens)
         return multi_hiddens, multi_llms
 
     
@@ -223,7 +222,7 @@ class Chat:
         attention_mask=input_id.ne(self.tokenizer.pad_token_id).to(self.device)
 
         ###### step2: (input_ids) => (inputs_embeds)
-        temp_input_id = copy.deepcopy(input_id).to(self.device)
+        temp_input_id = input_id.clone().to(self.device)
         temp_input_id[temp_input_id == FRAME_PATCH_TOKEN_ID] = 0
         temp_input_id[temp_input_id == FACE_PATCH_TOKEN_ID]  = 0
         temp_input_id[temp_input_id == AUDIO_PATCH_TOKEN_ID] = 0

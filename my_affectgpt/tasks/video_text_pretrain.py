@@ -5,10 +5,12 @@
  For full license text, see the LICENSE_Lavis file in the repo root or https://opensource.org/licenses/BSD-3-Clause
 """
 
+import logging
 import re
 
 from my_affectgpt.common.registry import registry
 from my_affectgpt.common.logger import MetricLogger
+from my_affectgpt.common.dist_utils import get_rank
 from my_affectgpt.datasets.data_utils import prepare_sample
 from my_affectgpt.conversation.conversation_video import Chat
 from my_affectgpt.evaluation.wheel import (
@@ -74,6 +76,7 @@ class VideoTextPretrainTask(BaseTask): # 所有内容继承自 video_text_pretra
         batch_size = len(samples["name"])
         face_or_frame = samples["face_or_frame"]
         max_new_tokens = int(runner.config.run_cfg.get("metric_max_new_tokens", 128))
+        total_to_gen = min(batch_size, remaining_samples) if remaining_samples else batch_size
 
         for index in range(batch_size):
             if remaining_samples is not None and len(predictions) >= remaining_samples:
@@ -86,10 +89,10 @@ class VideoTextPretrainTask(BaseTask): # 所有内容继承自 video_text_pretra
             _, image_llms = chat.postprocess_image(sample_data)
 
             multi_llms = None
-            if face_or_frame.startswith("multiface"):
-                _, multi_llms = chat.postprocess_multi(face_hiddens, audio_hiddens)
-            elif face_or_frame.startswith("multiframe"):
+            if face_or_frame.startswith("multiframe"):
                 _, multi_llms = chat.postprocess_multi(frame_hiddens, audio_hiddens)
+            elif face_or_frame.startswith("multiface"):
+                _, multi_llms = chat.postprocess_multi(face_hiddens, audio_hiddens)
 
             img_list = {
                 "audio": audio_llms,
@@ -117,6 +120,8 @@ class VideoTextPretrainTask(BaseTask): # 所有内容继承自 video_text_pretra
                     "raw_pred": response,
                 }
             )
+            if (len(predictions)) % 10 == 0 or len(predictions) == total_to_gen:
+                logging.info(f"[Generation] {len(predictions)}/{total_to_gen} predictions done")
 
         return predictions
 
@@ -127,20 +132,37 @@ class VideoTextPretrainTask(BaseTask): # 所有内容继承自 video_text_pretra
         results = {"losses": [], "predictions": []}
 
         collect_predictions = runner is not None and split_name in runner.metric_splits
-        chat = self._get_metric_chat(model, runner) if collect_predictions else None
+        is_main_process = not runner.config.run_cfg.distributed or get_rank() == 0
+        chat = self._get_metric_chat(model, runner) if (collect_predictions and is_main_process) else None
         remaining_samples = runner.get_metric_sample_limit(split_name) if runner is not None else None
 
         for samples in metric_logger.log_every(data_loader, print_freq, header):
-            samples = prepare_sample(samples, cuda_enabled=cuda_enabled)
-            loss = self.valid_step(model=model, samples=samples)
-            results["losses"].append(float(loss))
+            try:
+                samples = prepare_sample(samples, cuda_enabled=cuda_enabled)
+                loss = self.valid_step(model=model, samples=samples)
+                results["losses"].append(float(loss))
+            except RuntimeError as e:
+                if "out of memory" in str(e).lower():
+                    import gc, torch
+                    logging.warning("CUDA OOM during eval on %s, skipping batch", split_name)
+                    gc.collect(); torch.cuda.empty_cache()
+                    continue
+                raise
 
-            if collect_predictions:
+            if collect_predictions and is_main_process:
                 current_limit = None
                 if remaining_samples is not None:
                     current_limit = max(remaining_samples - len(results["predictions"]), 0)
-                batch_predictions = self._generate_predictions(samples, runner, chat, current_limit)
-                results["predictions"].extend(batch_predictions)
+                try:
+                    batch_predictions = self._generate_predictions(samples, runner, chat, current_limit)
+                    results["predictions"].extend(batch_predictions)
+                except RuntimeError as e:
+                    if "out of memory" in str(e).lower():
+                        import gc, torch
+                        logging.warning("CUDA OOM during generation on %s, skipping predictions", split_name)
+                        gc.collect(); torch.cuda.empty_cache()
+                    else:
+                        raise
 
         return results
 
@@ -196,6 +218,6 @@ class VideoTextPretrainTask(BaseTask): # 所有内容继承自 video_text_pretra
                     "evaluated_samples": micro_metrics["evaluated_samples"],
                 }
             )
-            metrics["agg_metrics"] = micro_metrics["f1"]
+            metrics["agg_metrics"] = wheel_f1
 
         return metrics

@@ -1,8 +1,7 @@
 import os
 import glob
-import scipy
+import random
 import numpy as np
-import pandas as pd
 
 from toolkit.utils.read_files import *
 from toolkit.utils.chatgpt import *
@@ -31,23 +30,14 @@ def _load_label_mappings():
     return format_mapping, raw_mapping, wheel_map_whole
 
 
-def normalize_openset_labels(label_text, metric='raw'):
-    labels = string_to_list(label_text)
-    labels = [item.lower().strip() for item in labels if item is not None and item.strip() != ""]
-    if metric == 'raw':
-        return sorted(set(labels))
-
+def calculate_exact_match_accuracy(name2gt, name2pred, process_names=None, metric='raw'):
     format_mapping, raw_mapping, wheel_map_whole = _load_label_mappings()
     if metric.startswith('case3'):
         _, wheelname, levelname = metric.split('_')
         wheel_map = wheel_map_whole[wheelname][levelname]
     else:
         wheel_map = None
-    mapped_labels = func_map_label_to_synonym(labels, format_mapping, raw_mapping, wheel_map, metric)
-    return sorted(set(mapped_labels))
 
-
-def calculate_exact_match_accuracy(name2gt, name2pred, process_names=None, metric='raw'):
     if process_names is None:
         process_names = [name for name in name2gt]
 
@@ -56,8 +46,54 @@ def calculate_exact_match_accuracy(name2gt, name2pred, process_names=None, metri
     for name in process_names:
         if name not in name2pred:
             continue
-        gt_labels = set(normalize_openset_labels(name2gt[name], metric=metric))
-        pred_labels = set(normalize_openset_labels(name2pred[name], metric=metric))
+        gt_labels = string_to_list(name2gt[name])
+        gt_labels = [item.lower().strip() for item in gt_labels if item is not None and item.strip() != ""]
+        if metric != 'raw':
+            mapped = []
+            for label in gt_labels:
+                if label not in format_mapping:
+                    continue
+                if metric.startswith('case1'):
+                    candidates = format_mapping[label]
+                    mapped.append(random.choice(candidates))
+                elif metric.startswith('case2'):
+                    candidates = format_mapping[label]
+                    level2 = random.choice(candidates)
+                    if level2 in raw_mapping:
+                        mapped.append(random.choice(raw_mapping[level2]))
+                elif metric.startswith('case3'):
+                    for fmt in format_mapping[label]:
+                        for raw in raw_mapping[fmt]:
+                            if raw in wheel_map:
+                                mapped.append(wheel_map[raw])
+                                break
+            gt_labels = [l for l in mapped if l]
+        gt_labels = set(sorted(set(gt_labels)))
+
+        pred_labels = string_to_list(name2pred[name])
+        pred_labels = [item.lower().strip() for item in pred_labels if item is not None and item.strip() != ""]
+        if metric != 'raw':
+            mapped = []
+            for label in pred_labels:
+                if label not in format_mapping:
+                    continue
+                if metric.startswith('case1'):
+                    candidates = format_mapping[label]
+                    mapped.append(random.choice(candidates))
+                elif metric.startswith('case2'):
+                    candidates = format_mapping[label]
+                    level2 = random.choice(candidates)
+                    if level2 in raw_mapping:
+                        mapped.append(random.choice(raw_mapping[level2]))
+                elif metric.startswith('case3'):
+                    for fmt in format_mapping[label]:
+                        for raw in raw_mapping[fmt]:
+                            if raw in wheel_map:
+                                mapped.append(wheel_map[raw])
+                                break
+            pred_labels = [l for l in mapped if l]
+        pred_labels = set(sorted(set(pred_labels)))
+
         matched += int(gt_labels == pred_labels)
         total += 1
 
@@ -67,6 +103,13 @@ def calculate_exact_match_accuracy(name2gt, name2pred, process_names=None, metri
 
 
 def calculate_micro_metrics(name2gt, name2pred, process_names=None, metric='raw'):
+    format_mapping, raw_mapping, wheel_map_whole = _load_label_mappings()
+    if metric.startswith('case3'):
+        _, wheelname, levelname = metric.split('_')
+        wheel_map = wheel_map_whole[wheelname][levelname]
+    else:
+        wheel_map = None
+
     if process_names is None:
         process_names = [name for name in name2gt]
 
@@ -79,8 +122,53 @@ def calculate_micro_metrics(name2gt, name2pred, process_names=None, metric='raw'
         if name not in name2pred:
             continue
 
-        gt_labels = set(normalize_openset_labels(name2gt[name], metric=metric))
-        pred_labels = set(normalize_openset_labels(name2pred[name], metric=metric))
+        gt_labels = string_to_list(name2gt[name])
+        gt_labels = [item.lower().strip() for item in gt_labels if item is not None and item.strip() != ""]
+        if metric != 'raw':
+            mapped = []
+            for label in gt_labels:
+                if label not in format_mapping:
+                    continue
+                if metric.startswith('case1'):
+                    candidates = format_mapping[label]
+                    mapped.append(random.choice(candidates))
+                elif metric.startswith('case2'):
+                    candidates = format_mapping[label]
+                    level2 = random.choice(candidates)
+                    if level2 in raw_mapping:
+                        mapped.append(random.choice(raw_mapping[level2]))
+                elif metric.startswith('case3'):
+                    for fmt in format_mapping[label]:
+                        for raw in raw_mapping[fmt]:
+                            if raw in wheel_map:
+                                mapped.append(wheel_map[raw])
+                                break
+            gt_labels = [l for l in mapped if l]
+        gt_labels = set(sorted(set(gt_labels)))
+
+        pred_labels = string_to_list(name2pred[name])
+        pred_labels = [item.lower().strip() for item in pred_labels if item is not None and item.strip() != ""]
+        if metric != 'raw':
+            mapped = []
+            for label in pred_labels:
+                if label not in format_mapping:
+                    continue
+                if metric.startswith('case1'):
+                    candidates = format_mapping[label]
+                    mapped.append(random.choice(candidates))
+                elif metric.startswith('case2'):
+                    candidates = format_mapping[label]
+                    level2 = random.choice(candidates)
+                    if level2 in raw_mapping:
+                        mapped.append(random.choice(raw_mapping[level2]))
+                elif metric.startswith('case3'):
+                    for fmt in format_mapping[label]:
+                        for raw in raw_mapping[fmt]:
+                            if raw in wheel_map:
+                                mapped.append(wheel_map[raw])
+                                break
+            pred_labels = [l for l in mapped if l]
+        pred_labels = set(sorted(set(pred_labels)))
 
         true_positive += len(gt_labels & pred_labels)
         false_positive += len(pred_labels - gt_labels)
@@ -99,66 +187,28 @@ def calculate_micro_metrics(name2gt, name2pred, process_names=None, metric='raw'
     }
 
 
-# case1: 计算只依赖于 format_mapping 下的结果
-def func_backward_case1(label, format_mapping, raw_mapping=None, wheel_map=None):
-    if label not in format_mapping:
-        return ""
-    
-    stage1_labels = format_mapping[label]
-    assert isinstance(stage1_labels, list)
-    stage1_unique = sorted(stage1_labels)[0]
-    
-    return stage1_unique
+def wheel_metric_calculation(gt_root=None, gt_csv=None, name2gt=None,
+                             openset_root=None, openset_npz=None, name2pred=None,
+                             process_names=None, inter_print=True, level='level1'):
 
+    if level == 'level1':
+        candidate_metrics = [
+                            'case3_wheel1_level1',
+                            'case3_wheel2_level1',
+                            'case3_wheel3_level1',
+                            'case3_wheel4_level1',
+                            'case3_wheel5_level1',
+                            ]
+    elif level == 'level2':
+        candidate_metrics = [
+                            'case3_wheel1_level2',
+                            'case3_wheel2_level2',
+                            'case3_wheel3_level2',
+                            'case3_wheel4_level2',
+                            'case3_wheel5_level2',
+                            ]
 
-# case2: 核心是保证 backward 过程中的唯一性
-def func_backward_case2(label, format_mapping, raw_mapping, wheel_map=None):
-    if label not in format_mapping:
-        return ""
-    
-    stage1_labels = format_mapping[label]
-    assert isinstance(stage1_labels, list)
-    stage1_unique = sorted(stage1_labels)[0]
-    
-    stage2_labels = raw_mapping[stage1_unique]
-    assert isinstance(stage2_labels, list)
-    stage2_unique = sorted(stage2_labels)[0]
-    return stage2_unique
-
-
-## 函数3：引入 emotion wheel 进行评价
-def func_backward_case3(label, format_mapping, raw_mapping, wheel_map):
-    if label not in format_mapping:
-        return ""
-    
-    level1_whole = []
-    for format in format_mapping[label]:
-        for raw in raw_mapping[format]:
-            level1_whole.append(raw)
-    
-    for level1 in sorted(level1_whole): # 保证了结果唯一性
-        if level1 in wheel_map:
-            return wheel_map[level1]
-    return ""
-
-
-# metric: ['case1', 'case2', 'case3'] 展示的是一种层级化的聚类结果，从而看出每层的必要性
-def func_map_label_to_synonym(mlist, format_mapping, raw_mapping, wheel_map, metric='case1'):
-    new_mlist = []
-    for label in mlist:
-        if metric.startswith('case1'): label = func_backward_case1(label, format_mapping)
-        if metric.startswith('case2'): label = func_backward_case2(label, format_mapping, raw_mapping)
-        if metric.startswith('case3'): label = func_backward_case3(label, format_mapping, raw_mapping, wheel_map)
-        if label == '': continue # 如果找不到 backward 的词，就把他剔除
-        new_mlist.append(label)
-    return new_mlist
-
-
-def calculate_openset_overlap_rate(gt_root=None, gt_csv=None, name2gt=None, 
-                                   openset_root=None, openset_npz=None, name2pred=None, 
-                                   process_names=None, 
-                                   metric='case1',
-                                   inter_print=True):
+    format_mapping, raw_mapping, wheel_map_whole = _load_label_mappings()
 
     # read name2gt
     if name2gt is None:
@@ -182,94 +232,86 @@ def calculate_openset_overlap_rate(gt_root=None, gt_csv=None, name2gt=None,
             for (name, item) in zip(names, items):
                 name2pred[name] = item
 
-    # process_names => (whole) / (subset)
     if process_names is None:
         process_names = [name for name in name2gt]
 
-    # read all mapping # 改为默认从外部读取吧
-    format_mapping, raw_mapping, wheel_map_whole = _load_label_mappings()
-    if metric.startswith('case3'):
-        _, wheelname, levelname = metric.split('_')
-        wheel_map = wheel_map_whole[wheelname][levelname]
-    else:
-        wheel_map = None
-
-    # calculate (accuracy, recall) two values
-    accuracy, recall = [], []
-    for name in process_names:      
-       
-        # 删除 gt and pred 中的同义词
-        gt = string_to_list(name2gt[name])
-        gt = [item.lower().strip() for item in gt]
-        gt = set(func_map_label_to_synonym(gt, format_mapping, raw_mapping, wheel_map, metric))
-
-        pred = string_to_list(name2pred[name])
-        pred = [item.lower().strip() for item in pred]
-        pred = set(func_map_label_to_synonym(pred, format_mapping, raw_mapping, wheel_map, metric))
-
-        if len(gt) == 0: continue
-        if len(pred) == 0:
-            accuracy.append(0)
-            recall.append(0)
-        else:
-            accuracy.append(len(gt & pred)/len(pred))
-            recall.append(len(gt & pred)/len(gt))
-    if inter_print: print ('process number (after filter): ', len(accuracy))
-
-    ## for special case
-    if len(accuracy) != 0:
-        avg_accuracy = np.mean(accuracy)
-    else:
-        avg_accuracy = 0
-    
-    if len(recall) != 0:
-        avg_recall = np.mean(recall)
-    else:
-        avg_recall = 0
-
-    ## print results
-    if inter_print: print (f'avg acc: {avg_accuracy} avg recall: {avg_recall}')
-    return  avg_accuracy, avg_recall
-
-
-def wheel_metric_calculation(gt_root=None, gt_csv=None, name2gt=None, 
-                             openset_root=None, openset_npz=None, name2pred=None, 
-                             process_names=None, inter_print=True, level='level1'):
-
-    if level == 'level1':
-        candidate_metrics = [
-                            'case3_wheel1_level1',
-                            'case3_wheel2_level1',
-                            'case3_wheel3_level1',
-                            'case3_wheel4_level1',
-                            'case3_wheel5_level1',
-                            ]
-    elif level == 'level2':
-        candidate_metrics = [
-                            'case3_wheel1_level2',
-                            'case3_wheel2_level2',
-                            'case3_wheel3_level2',
-                            'case3_wheel4_level2',
-                            'case3_wheel5_level2',
-                            ]
-
-    # 计算每个metric的这个值
     whole_scores = []
     for metric in candidate_metrics:
-        precision, recall = calculate_openset_overlap_rate(gt_root=gt_root,
-                                                           gt_csv=gt_csv,
-                                                           name2gt=name2gt,
-                                                           openset_root=openset_root, 
-                                                           openset_npz=openset_npz, 
-                                                           name2pred=name2pred,
-                                                           process_names=process_names, 
-                                                           metric=metric,
-                                                           inter_print=inter_print)
-        # 非常少的概率下，会出现这个情况
-        if precision + recall == 0:
+        _, wheelname, levelname = metric.split('_')
+        wheel_map = wheel_map_whole[wheelname][levelname]
+
+        accuracy, recall = [], []
+        for name in process_names:
+            gt = string_to_list(name2gt[name])
+            gt = [item.lower().strip() for item in gt]
+            mapped_gt = []
+            for label in gt:
+                if label not in format_mapping:
+                    continue
+                level1_whole = []
+                for fmt in format_mapping[label]:
+                    for raw in raw_mapping[fmt]:
+                        level1_whole.append(raw)
+                random.shuffle(level1_whole)
+                found = ""
+                for level1 in level1_whole:
+                    if level1 in wheel_map:
+                        found = wheel_map[level1]
+                        break
+                if found:
+                    mapped_gt.append(found)
+            gt = set(mapped_gt)
+
+            pred = string_to_list(name2pred[name])
+            pred = [item.lower().strip() for item in pred]
+            mapped_pred = []
+            for label in pred:
+                if label not in format_mapping:
+                    continue
+                level1_whole = []
+                for fmt in format_mapping[label]:
+                    for raw in raw_mapping[fmt]:
+                        level1_whole.append(raw)
+                random.shuffle(level1_whole)
+                found = ""
+                for level1 in level1_whole:
+                    if level1 in wheel_map:
+                        found = wheel_map[level1]
+                        break
+                if found:
+                    mapped_pred.append(found)
+            pred = set(mapped_pred)
+
+            if len(gt) == 0:
+                continue
+            if len(pred) == 0:
+                accuracy.append(0)
+                recall.append(0)
+            else:
+                accuracy.append(len(gt & pred) / len(pred))
+                recall.append(len(gt & pred) / len(gt))
+
+        if inter_print:
+            print('process number (after filter): ', len(accuracy))
+
+        if len(accuracy) != 0:
+            avg_accuracy = np.mean(accuracy)
+        else:
+            avg_accuracy = 0
+
+        if len(recall) != 0:
+            avg_recall = np.mean(recall)
+        else:
+            avg_recall = 0
+
+        if inter_print:
+            print(f'avg acc: {avg_accuracy} avg recall: {avg_recall}')
+
+        if avg_accuracy + avg_recall == 0:
             fscore = 0
         else:
-            fscore = 2 * (precision * recall) / (precision + recall)
-        whole_scores.append([fscore, precision, recall])
+            fscore = 2 * (avg_accuracy * avg_recall) / (avg_accuracy + avg_recall)
+        whole_scores.append([fscore, avg_accuracy, avg_recall])
+
     avg_scores = (np.mean(whole_scores, axis=0)).tolist()
     return avg_scores

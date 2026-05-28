@@ -54,8 +54,9 @@ def main():
     args = parse_args()
     cfg = Config(args)
 
-    # 用于分布式训练：防止 nccl barrier 卡死，job_id 统一确保进程能找到对应的进程组
-    os.environ["TORCH_NCCL_BLOCKING_WAIT"] = "1"
+    # 分布式训练：异步错误处理 + 超时，避免 NCCL 死锁时无限挂起
+    os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
+    os.environ["NCCL_TIMEOUT"] = "1800"
     job_name = os.path.basename(args.cfg_path)[:-len('.yaml')]
     job_id = f"{job_name}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
 
@@ -82,7 +83,10 @@ def main():
     runner.train()
 
     if cfg.run_cfg.distributed:
-        torch.distributed.destroy_process_group()
+        try:
+            torch.distributed.destroy_process_group()
+        except Exception:
+            pass
 
 if __name__ == "__main__":
     main()

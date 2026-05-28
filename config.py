@@ -2,7 +2,7 @@
 import os
 
 _CONFIG_DIR = os.path.dirname(os.path.abspath(__file__))
-_MODEL_BASE = os.path.normpath(os.path.join(_CONFIG_DIR, '..', 'models'))
+_MODEL_BASE = '/work/2025/liusiyu/gitcode/MERTools/MER2026/models'
 
 AFFECTGPT_ROOT = _CONFIG_DIR
 EMOTION_WHEEL_ROOT = os.path.join(_CONFIG_DIR, 'emotion_wheel')

@@ -1,7 +1,12 @@
 #!/bin/bash
-# Stage 2 Full Training (use after Stage 1 completes)
-# Update CKPT_PATH with your Stage 1 best checkpoint path
-CKPT_PATH="output/mercaptionplus_cmef_tpa_stage1/YOUR_STAGE1_DIR/checkpoints/best_val.pth"
+# Stage 2: Fine-tuning on Human dataset
+# Load best checkpoint from stage1, lower LR
 
-cd /work/2025/liusiyu/gitcode/MERTools/MER2026/MER2026_Track2
-CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 train.py --cfg-path train_configs/mercaptionplus_cmef_tpa.yaml --options model.ckpt=$CKPT_PATH
+cd /work/2025/liusiyu/track2_rebuild
+
+# IMPORTANT: Update ckpt path after stage1 completes
+CKPT_PATH="output/stage1_joint_pretrain/stage1_joint_pretrain_*/checkpoint_best.pth"
+
+python train.py \
+    --cfg-path train_configs/stage2_human_finetune.yaml \
+    --options model.ckpt="${CKPT_PATH}" run.device=cuda run.world_size=1

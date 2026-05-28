@@ -90,6 +90,103 @@ def prepare_sample(samples, cuda_enabled=True):
     return samples
 
 
+def deduplicate_cross_dataset(datasets):
+    """
+    Ensure no sample appears in both a val split and any other dataset's train split.
+    Also remove duplicates when a sample appears in multiple val splits.
+
+    For samples that appear in multiple val splits, keep them in the alphabetically
+    first dataset and remove from others.
+
+    Args:
+        datasets: dict of {dataset_name: {split_name: dataset}}
+
+    Returns:
+        Modified datasets dict.
+    """
+    if len(datasets) <= 1:
+        return datasets
+
+    sorted_names = sorted(datasets.keys())
+
+    # Step 1: Collect all val sample names per dataset (before any dedup)
+    val_names_per_dataset = {}
+    for dataset_name in sorted_names:
+        val_names = set()
+        splits = datasets[dataset_name]
+        for split_name, dataset_split in splits.items():
+            if split_name.endswith("val") and hasattr(dataset_split, "annotation"):
+                for ann in dataset_split.annotation:
+                    name = ann.get("name", "")
+                    if name:
+                        val_names.add(name)
+        val_names_per_dataset[dataset_name] = val_names
+
+    # Step 2: Build ownership map - each shared sample is owned by alphabetically first dataset
+    # This ensures shared samples appear in only ONE val set
+    sample_to_owner = {}
+    for dataset_name in sorted_names:
+        for name in val_names_per_dataset[dataset_name]:
+            if name not in sample_to_owner:
+                sample_to_owner[name] = dataset_name
+
+    # Step 3: For each val split, keep only samples owned by this dataset
+    for dataset_name in sorted_names:
+        splits = datasets[dataset_name]
+        for split_name, dataset_split in list(splits.items()):
+            if not split_name.endswith("val") or not hasattr(dataset_split, "annotation"):
+                continue
+            original_len = len(dataset_split.annotation)
+            dataset_split.annotation = [
+                ann for ann in dataset_split.annotation
+                if sample_to_owner.get(ann.get("name", ""), dataset_name) == dataset_name
+            ]
+            new_len = len(dataset_split.annotation)
+            if original_len != new_len:
+                print(f"[Deduplicate] Removed {original_len - new_len} samples from {dataset_name}/{split_name} "
+                      f"(owned by earlier dataset)")
+
+    # Step 4: Collect updated val names after cross-dataset dedup
+    updated_val_names_per_dataset = {}
+    for dataset_name in sorted_names:
+        val_names = set()
+        splits = datasets[dataset_name]
+        for split_name, dataset_split in splits.items():
+            if split_name.endswith("val") and hasattr(dataset_split, "annotation"):
+                for ann in dataset_split.annotation:
+                    name = ann.get("name", "")
+                    if name:
+                        val_names.add(name)
+        updated_val_names_per_dataset[dataset_name] = val_names
+
+    # Step 5: Remove OTHER datasets' val samples from each dataset's train
+    for dataset_name in sorted_names:
+        splits = datasets[dataset_name]
+        if "train" not in splits:
+            continue
+        train_dataset = splits["train"]
+        if not hasattr(train_dataset, "annotation"):
+            continue
+
+        # Collect val names from ALL OTHER datasets (after dedup)
+        other_val_names = set()
+        for other_name in sorted_names:
+            if other_name != dataset_name:
+                other_val_names.update(updated_val_names_per_dataset[other_name])
+
+        original_len = len(train_dataset.annotation)
+        train_dataset.annotation = [
+            ann for ann in train_dataset.annotation
+            if ann.get("name", "") not in other_val_names
+        ]
+        new_len = len(train_dataset.annotation)
+        if original_len != new_len:
+            print(f"[Deduplicate] Removed {original_len - new_len} samples from {dataset_name}/train "
+                  f"(appear in other datasets' val)")
+
+    return datasets
+
+
 def reorg_datasets_by_split(datasets):
     """
     Organizes datasets by split.
@@ -100,9 +197,9 @@ def reorg_datasets_by_split(datasets):
     Returns:
         Dict of datasets by split {split_name: List[Datasets]}.
     """
-    # if len(datasets) == 1:
-    #     return datasets[list(datasets.keys())[0]]
-    # else:
+    # Deduplicate before reorganization
+    datasets = deduplicate_cross_dataset(datasets)
+
     reorg_datasets = dict()
 
     # reorganize by split

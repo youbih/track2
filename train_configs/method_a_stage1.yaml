@@ -1,0 +1,156 @@
+## Stage 1: Method A - CMEF + Sample Quality Gating
+## Purpose: Learn good fusion representations on mixed data (MERCaptionPlus + Human)
+## LLM is frozen, only fusion module and projection layers are trained
+## Key innovation: quality_estimator in CMEF suppresses low-quality samples
+##
+## Three validation sets:
+##   - machine_val: MERCaptionPlus only (machine annotation distribution)
+##   - human_val: Human only (human annotation distribution)
+##   - val: Combined (mixed distribution)
+
+model:
+  arch: affectgpt
+  model_type: pretrain_vicuna
+
+  frozen_video_proj: False
+  frozen_video_Qformer: True
+  frozen_audio_Qformer: True
+  frozen_audio_proj: False
+  frozen_multi_Qformer: False
+  frozen_multi_llama_proj: False
+  frozen_llm: True          # Stage 1: freeze LLM
+  frozen_cmef: False        # Stage 1: train CMEF
+
+  audio_fusion_type: tpa
+  video_fusion_type: tpa
+  multi_fusion_type: cmef   # CMEF with quality gating
+  image_fusion_type: mean
+
+  tpa_num_heads: 8
+  tpa_dropout: 0.1
+  tpa_scales: [1, 2, 4]
+  cmef_num_heads: 8
+  cmef_num_layers: 2        # p2a validated 2 layers
+  cmef_dropout: 0.1
+  num_emotion_prototypes: 8
+  contrastive_weight: 0.1   # contrastive loss for prototype learning
+  contrastive_temperature: 0.07
+
+  lora_r: 8                 # Stage 1: lower rank
+  lora_alpha: 16
+  lora_dropout: 0.1
+  lora_target: "attention"
+
+  max_length: 512
+
+  llama_model: "Qwen25"
+  acoustic_encoder: "HUBERT_LARGE"
+  visual_encoder: "CLIP_VIT_LARGE"
+
+  num_audio_query_token: 16
+  num_video_query_token: 16
+  num_multi_query_token: 8
+  num_image_query_token: 1
+
+  ckpt: ""                  # Stage 1 starts from scratch
+  ckpt_2: ""
+
+  vis_processor:
+    train:
+      name: "alpro_video_train"
+      n_frms: 8
+      image_size: 224
+  text_processor:
+    train:
+      name: "blip_caption"
+  img_processor:
+    train:
+      name: "blip2_image_train"
+      image_size: 224
+
+datasets:
+  mercaptionplus:
+    data_type: video
+    face_or_frame: 'frame'
+    label_type: 'ovlabel'
+    split_role: 'train'
+    enable_val_split: true
+    val_ratio: 0.1
+    split_seed: 42
+    ratio: 1.0               # p2b proved full data is better
+    train_monitor_ratio: 0.02
+    filter_wheel_labels: false  # p2b used no filter, better performance
+    split_prefix: "machine_"    # Creates machine_val for separate eval
+
+  human:
+    data_type: video
+    face_or_frame: 'frame'
+    label_type: 'ovlabel'
+    split_role: 'train'
+    enable_val_split: true    # Enable val split for human
+    val_ratio: 0.15          # ~230 samples for human_val
+    split_seed: 42
+    ratio: 1.0               # All human samples
+    train_monitor_ratio: 0.05
+    filter_wheel_labels: true
+    split_prefix: "human_"      # Creates human_val for separate eval
+
+run:
+  task: video_text_pretrain
+  lr_sched: "linear_warmup_cosine_lr"
+  init_lr: 5e-5
+  min_lr: 1e-6
+  warmup_lr: 1e-6
+  weight_decay: 0.05
+  max_epoch: 12
+  iters_per_epoch: 2000
+  warmup_steps: 500
+  batch_size_train: 1
+  batch_size_eval: 1
+  accum_grad_iters: 16
+  seed: 42
+  num_workers: 4
+  amp: True
+  resume_ckpt_path: null
+  evaluate: False
+  train_splits: ["train"]
+  monitor_splits: ["train_monitor"]
+  valid_splits: ["val", "machine_val", "human_val"]  # Three validation sets
+  test_splits: ["test"]
+  val_freq: 2
+  early_stop_patience: 8
+  metric_max_new_tokens: 128
+  metric_max_samples_by_split:
+    train_monitor: 100
+    val: 200
+    machine_val: 200
+    human_val: 200
+    test: 300
+  device: "cuda"
+  world_size: 1
+  dist_url: "env://"
+  distributed: False
+  output_dir: "output/method_a_stage1"
+
+inference:
+  task: video_text_pretrain
+  vis_processor:
+    train:
+      name: "alpro_video_eval"
+      n_frms: 8
+      image_size: 224
+  text_processor:
+    train:
+      name: "blip_caption"
+  img_processor:
+    train:
+      name: "blip2_image_eval"
+      image_size: 224
+  face_or_frame: 'frame'
+  base_root: 'output/results_method_a_stage1'
+  ckpt_root: xxx
+  ckpt_name: xxx
+  test_epoch: xxx
+  test_epochs: xxx-xxx
+  skip_epoch: 1
+  gpu: 0

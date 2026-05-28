@@ -43,6 +43,14 @@ class BaseDataset():
                                                 "Please provide a detailed description of this audio.",
                                                 "Could you describe the contents of this audio for me?"]
 
+        self.ovlabel_question_candidates = [
+            "Please recognize all possible emotional states of the character.",
+            "What emotions can you identify in this person?",
+            "Identify and describe the character's emotional state.",
+            "What is the emotional state of the person in this video?",
+            "Please analyze the character's emotions.",
+        ]
+
         ####################################
         ## part2: (model_cfg, dataset_cfg) specific ones
         if model_cfg is None or dataset_cfg is None: return
@@ -52,6 +60,8 @@ class BaseDataset():
         self.num_audio_query_token = model_cfg.num_audio_query_token
         self.num_multi_query_token = model_cfg.num_multi_query_token
         self.num_image_query_token = model_cfg.num_image_query_token
+        # NEW: hierarchical supervision flag from model config
+        self.hierarchical_supervision = getattr(model_cfg, 'hierarchical_supervision', False)
 
         ## 控制视频采样的帧数
         self.n_frms = model_cfg.vis_processor.train.n_frms
@@ -69,25 +79,18 @@ class BaseDataset():
             self.annotation = self.func_random_sample_subset(self.annotation, ratio=dataset_cfg.ratio)
             print(f'after sampled sample number: {len(self.annotation)}')
 
+        # NEW: Filter out labels not present in emotion wheel mapping
+        if dataset_cfg is not None and dataset_cfg.get("filter_wheel_labels", False):
+            self._filter_wheel_labels()
+
         ####################################
-        ## part3: debug
-        sample1 = self.__getitem__(random.randint(0, len(self)-1))
-        sample2 = self.__getitem__(random.randint(0, len(self)-1))
-        sample3 = self.__getitem__(random.randint(0, len(self)-1))
-        self.func_visualize_samples(sample1)
-        self.func_visualize_samples(sample2)
-        self.func_visualize_samples(sample3)
-        samples = [sample1, sample2, sample3]
-        self.collater(samples)
-
-        ## debug2: for all datasets (whether contains errors)
-        # print ('Debug: whether all data are readable?')
-        # for index in tqdm.tqdm(range(len(self))):
-        #     sample = self.__getitem__(index)
-        #     self.func_visualize_samples(sample)
-        #     # print (sample['raw_audio'].shape)
-
-        ## debug3: short version, only length
+        ## part3: debug (only when enabled)
+        if dataset_cfg is not None and dataset_cfg.get("debug_init", False):
+            for _ in range(3):
+                sample = self.__getitem__(random.randint(0, len(self)-1))
+                self.func_visualize_samples(sample)
+            samples = [self.__getitem__(random.randint(0, len(self)-1)) for _ in range(3)]
+            self.collater(samples)
         print ('training sample number: ', len(self))
         ####################################
 
@@ -140,43 +143,69 @@ class BaseDataset():
         annotations_subset = random.sample(annotations, int(len(annotations)*ratio))
         return annotations_subset
 
+    def _filter_wheel_labels(self):
+        """Filter out labels not present in emotion wheel format_mapping.
 
-    ###########################################################
-    ## 数据读取部分操作
-    ###########################################################
-    # all types: {audio, frame, face, image}
+        This ensures the model only learns labels that can be evaluated
+        by the wheel metric, eliminating ~68% of MERCaptionPlus noise.
+        """
+        import numpy as np
+        from my_affectgpt.evaluation.wheel import _load_label_mappings
+
+        format_mapping, _, _ = _load_label_mappings()
+
+        filtered_annotation = []
+        for sample in self.annotation:
+            if 'ovlabel' not in sample:
+                filtered_annotation.append(sample)
+                continue
+
+            labels = self._string_to_list(sample['ovlabel'])
+            valid_labels = []
+            for label in labels:
+                label_clean = label.lower().strip()
+                if label_clean in format_mapping:
+                    valid_labels.append(label)
+
+            if len(valid_labels) > 0:
+                new_sample = copy.deepcopy(sample)
+                new_sample['ovlabel'] = ", ".join(valid_labels)
+                filtered_annotation.append(new_sample)
+
+        removed = len(self.annotation) - len(filtered_annotation)
+        self.annotation = filtered_annotation
+        print(f'[WheelFilter] Removed {removed} samples with no valid wheel labels. '
+              f'Kept {len(self.annotation)} samples.')
+
+    @staticmethod
+    def _string_to_list(text):
+        """Safely parse a string of comma-separated labels."""
+        if text is None or text == '':
+            return []
+        return [item.strip() for item in text.split(',') if item.strip()]
+
+
+    # Maps face_or_frame mode -> list of needed data types
+    _NEEDED_DATA_MAP = {
+        'faceframe': ['audio', 'frame', 'face'],
+        'face': ['audio', 'face'],
+        'frame': ['audio', 'frame'],
+        'audioonly': ['audio'],
+        'textonly': [],
+        'faceonly': ['face'],
+        'frameonly': ['frame'],
+        'image': ['image'],
+        'audio_text': ['audio'],
+        'face_text': ['face'],
+        'frame_text': ['frame'],
+        'multiface_text': ['face', 'audio'],
+        'multiface_audio_face_text': ['face', 'audio'],
+        'multiframe_audio_frame_text': ['frame', 'audio'],
+        'multiface_audio_face_frame_text': ['frame', 'face', 'audio'],
+    }
+
     def get_needed_data(self, face_or_frame):
-        if face_or_frame == 'faceframe': # (face, frame, audio, text)
-            needed_data = ['audio', 'frame', 'face']
-        elif face_or_frame == 'face': # (face, audio, text)
-            needed_data = ['audio', 'face']
-        elif face_or_frame == 'frame': # (frame, audio, text)
-            needed_data = ['audio', 'frame']
-        elif face_or_frame == 'audioonly': # (audio)
-            needed_data = ['audio']
-        elif face_or_frame == 'textonly':  # (text)
-            needed_data = []
-        elif face_or_frame == 'faceonly':  # (face)
-            needed_data = ['face']
-        elif face_or_frame == 'frameonly': # (frame)
-            needed_data = ['frame']
-        elif face_or_frame == 'multiface_text': # (multi, text)
-            needed_data = ['face', 'audio']
-        elif face_or_frame == 'multiface_audio_face_text': # (multi, face, audio, text)
-            needed_data = ['face', 'audio']
-        elif face_or_frame == 'image': # (image)
-            needed_data = ['image']
-        elif face_or_frame == 'multiframe_audio_frame_text': # (multi, face, audio, text)
-            needed_data = ['frame', 'audio']
-        elif face_or_frame == 'multiface_audio_face_frame_text': # (multi, face, audio, text)
-            needed_data = ['frame', 'face', 'audio']
-        elif face_or_frame == 'audio_text': # (audio, text)
-            needed_data = ['audio']
-        elif face_or_frame == 'face_text': # (face, text)
-            needed_data = ['face']
-        elif face_or_frame == 'frame_text': # (frame, text)
-            needed_data = ['frame']
-        return needed_data
+        return self._NEEDED_DATA_MAP.get(face_or_frame, [])
     
 
     def read_frame_face_audio_text(self, video_path=None, face_npy=None, audio_path=None, image_path=None):
@@ -260,16 +289,69 @@ class BaseDataset():
                 'answer':sample['description'],
                 }
     
-    def func_get_qa_ovlabel(self, sample, question_only=False):
-        question = "Please recognize all possible emotional states of the character."
-
+    def func_get_qa_ovlabel(self, sample, question_only=False, hierarchical=False):
         if question_only:
+            question = "Please recognize all possible emotional states of the character."
             return question
         else:
+            question = self.func_random_prompts(self.ovlabel_question_candidates)
+            answer_text = self._build_hierarchical_answer(sample['ovlabel']) if hierarchical else f"The character's emotional state is {sample['ovlabel']}."
             return {
                 'question': question,
-                'answer':  f"The character's emotional state is {sample['ovlabel']}."
-                }
+                'answer': answer_text,
+            }
+
+    def _build_hierarchical_answer(self, ovlabel_text):
+        """Build answer with hierarchical emotion wheel information.
+
+        For each label, include its level2 (intermediate) and level1 (wheel-class)
+        mapping. This forces the LLM to learn the wheel hierarchy during training.
+        """
+        import numpy as np
+        from my_affectgpt.evaluation.wheel import _load_label_mappings
+
+        format_mapping, raw_mapping, wheel_map_whole = _load_label_mappings()
+        labels = self._string_to_list(ovlabel_text)
+
+        label_parts = []
+        for label in labels:
+            label_clean = label.lower().strip()
+            if label_clean not in format_mapping:
+                label_parts.append(label)
+                continue
+
+            level2 = self._backward_case1(label_clean, format_mapping)
+            level1 = self._backward_case2(label_clean, format_mapping, raw_mapping)
+
+            # Find which wheel this label belongs to
+            wheel_name = None
+            if level1:
+                for wname in wheel_map_whole:
+                    if level1 in wheel_map_whole[wname]['level1']:
+                        wheel_name = wname
+                        break
+
+            if level2 and level1 and wheel_name:
+                label_parts.append(f"{label} (L2={level2}, L1={level1}, {wheel_name})")
+            else:
+                label_parts.append(label)
+
+        return "The character's emotional state is " + ", ".join(label_parts) + "."
+
+    @staticmethod
+    def _backward_case1(label, format_mapping):
+        if label not in format_mapping:
+            return ""
+        return random.choice(format_mapping[label])
+
+    @staticmethod
+    def _backward_case2(label, format_mapping, raw_mapping):
+        if label not in format_mapping:
+            return ""
+        level2 = random.choice(format_mapping[label])
+        if level2 not in raw_mapping:
+            return ""
+        return random.choice(raw_mapping[level2])
     
     def func_get_qa_onehot_w_candidates(self, sample, question_only=False):
         question = f"Please select the label that can best describe the person's emotional state from the provided candidate labels: {self.candidate_labels}."
@@ -393,8 +475,10 @@ class BaseDataset():
             }
         
         elif dataset in ['MERCaptionPlus', 'Human']:
+            # Enable hierarchical supervision if configured
+            hierarchical = getattr(self, 'hierarchical_supervision', False)
             candidates = {
-                'ovlabel':     self.func_get_qa_ovlabel(sample),
+                'ovlabel':     self.func_get_qa_ovlabel(sample, hierarchical=hierarchical),
             }
         
         elif dataset in ['Preference']: # 带 preference 优化
@@ -458,105 +542,58 @@ class BaseDataset():
         return candidates[label_type] # 包含 question, answer 两部分内容
 
 
+    # Prompt template segments
+    _PROMPT_SEGMENTS = {
+        'audio':    "The audio content is as follows: <Audio><AudioHere></Audio>. ",
+        'frame':    "Meanwhile, we uniformly sample raw frames from the video: <Video><FrameHere></Video>. ",
+        'face':     "Meanwhile, we uniformly sample raw frames from the video and extract faces from these frames: <Video><FaceHere></Video>. ",
+        'image':    "The image content is as follows: <Image><ImageHere></Image>. ",
+        'multi':    "The audio and video merged info is: <Multi><MultiHere></Multi>. ",
+        'subtitle': "The subtitle of this video is: <Subtitle>{subtitle}</Subtitle>. ",
+    }
+    _PROMPT_END = "Now, please answer my question based on all the provided information. {user_message} ###Assistant: "
+
+    # (skip_header, [segment_keys])
+    _PROMPT_MODES = {
+        'faceframe':                       (False, ['audio', 'frame', 'face', 'subtitle']),
+        'face':                            (False, ['audio', 'face', 'subtitle']),
+        'frame':                           (False, ['audio', 'frame', 'subtitle']),
+        'audioonly':                       (False, ['audio']),
+        'textonly':                        (False, ['subtitle']),
+        'faceonly':                        (False, ['face']),
+        'frameonly':                       (False, ['frame']),
+        'image':                           (False, ['image']),
+        'audio_text':                      (True,  ['audio', 'subtitle']),
+        'face_text':                       (True,  ['face', 'subtitle']),
+        'frame_text':                      (True,  ['frame', 'subtitle']),
+        'multiface_text':                  (False, ['multi', 'subtitle']),
+        'multiface_audio_face_text':       (False, ['multi', 'audio', 'face', 'subtitle']),
+        'multiframe_audio_frame_text':     (False, ['multi', 'audio', 'frame', 'subtitle']),
+        'multiface_audio_face_frame_text': (False, ['multi', 'audio', 'face', 'frame', 'subtitle']),
+    }
+
     def get_prompt_for_multimodal(self, face_or_frame, subtitle, user_message):
-
-        # step5: get prompts for differet cases [可能存在三种数据加载情况，从而能够扩展至4种模态输入]
-        if face_or_frame == 'faceframe': # (face, frame, audio, text)
+        skip_header, segment_keys = self._PROMPT_MODES[face_or_frame]
+        if 'subtitle' in segment_keys:
             assert subtitle is not None
-            prompt = f"###Human: The audio content is as follows: <Audio><AudioHere></Audio>. " \
-                    + f"Meanwhile, we uniformly sample raw frames from the video: <Video><FrameHere></Video>. "  \
-                    + f"Additionally, we uniformly sample raw frames from the video and extract faces from these frames: <Video><FaceHere></Video>. "  \
-                    + f"The subtitle of this video is: <Subtitle>{subtitle}</Subtitle>. " \
-                    + f"Now, please answer my question based on all the provided information. {user_message} ###Assistant: "
-        elif face_or_frame == 'face': # (face, audio, text)
-            assert subtitle is not None
-            prompt = f"###Human: The audio content is as follows: <Audio><AudioHere></Audio>. " \
-                    + f"Meanwhile, we uniformly sample raw frames from the video and extract faces from these frames: <Video><FaceHere></Video>. "  \
-                    + f"The subtitle of this video is: <Subtitle>{subtitle}</Subtitle>. " \
-                    + f"Now, please answer my question based on all the provided information. {user_message} ###Assistant: "
-        elif face_or_frame == 'frame': # (frame, audio, text)
-            assert subtitle is not None
-            prompt = f"###Human: The audio content is as follows: <Audio><AudioHere></Audio>. " \
-                    + f"Meanwhile, we uniformly sample raw frames from the video: <Video><FrameHere></Video>. "  \
-                    + f"The subtitle of this video is: <Subtitle>{subtitle}</Subtitle>. " \
-                    + f"Now, please answer my question based on all the provided information. {user_message} ###Assistant: "
-        elif face_or_frame == 'audioonly': # (audio)
-            prompt = f"###Human: The audio content is as follows: <Audio><AudioHere></Audio>. " \
-                    + f"Now, please answer my question based on all the provided information. {user_message} ###Assistant: "
-        elif face_or_frame == 'textonly':  # (text)
-            assert subtitle is not None
-            prompt = f"###Human: The subtitle of this video is: <Subtitle>{subtitle}</Subtitle>. " \
-                    + f"Now, please answer my question based on all the provided information. {user_message} ###Assistant: "
-        elif face_or_frame == 'faceonly':  # (face)
-            prompt = f"###Human: We uniformly sample raw frames from the video and extract faces from these frames: <Video><FaceHere></Video>. " \
-                    + f"Now, please answer my question based on all the provided information. {user_message} ###Assistant: "
-        elif face_or_frame == 'frameonly': # (frame)
-            prompt = f"###Human: We uniformly sample raw frames from the video: <Video><FrameHere></Video>. " \
-                    + f"Now, please answer my question based on all the provided information. {user_message} ###Assistant: "
-        elif face_or_frame == 'image': # (image)
-            prompt = f"###Human: The image content is as follows: <Image><ImageHere></Image>. " \
-                    + f"Now, please answer my question based on all the provided information. {user_message} ###Assistant: "
-        
-        ## 这部分是为了和其他 MLLM 进行公平比较，所进行的 ablation study 部分
-        elif face_or_frame == 'audio_text': # (audio, text)
-            assert subtitle is not None
-            prompt =  f"The audio content is as follows: <Audio><AudioHere></Audio>. " \
-                    + f"The subtitle of this video is: <Subtitle>{subtitle}</Subtitle>. " \
-                    + f"Now, please answer my question based on all the provided information. {user_message} ###Assistant: "
-        elif face_or_frame == 'face_text': # (audio, text)
-            assert subtitle is not None
-            prompt =  f"We uniformly sample raw frames from the video and extract faces from these frames: <Video><FaceHere></Video>. "  \
-                    + f"The subtitle of this video is: <Subtitle>{subtitle}</Subtitle>. " \
-                    + f"Now, please answer my question based on all the provided information. {user_message} ###Assistant: "
-        elif face_or_frame == 'frame_text': # (audio, text)
-            assert subtitle is not None
-            prompt =  f"We uniformly sample raw frames from the video: <Video><FrameHere></Video>. "  \
-                    + f"The subtitle of this video is: <Subtitle>{subtitle}</Subtitle>. " \
-                    + f"Now, please answer my question based on all the provided information. {user_message} ###Assistant: "
-            
-        ## 后面都是增加 <Multi> token 后的结果    
-        elif face_or_frame == 'multiface_text': # (multi, text)
-            assert subtitle is not None
-            prompt = f"###Human: The audio and video merged info is: <Multi><MultiHere></Multi>. " \
-                    + f"The subtitle of this video is: <Subtitle>{subtitle}</Subtitle>. " \
-                    + f"Now, please answer my question based on all the provided information. {user_message} ###Assistant: "
-        elif face_or_frame == 'multiface_audio_face_text': # (multi, face, audio, text)
-            assert subtitle is not None
-            prompt = f"###Human: The audio and video merged info is: <Multi><MultiHere></Multi>. " \
-                    + f"The audio content is as follows: <Audio><AudioHere></Audio>. " \
-                    + f"Meanwhile, we uniformly sample raw frames from the video and extract faces from these frames: <Video><FaceHere></Video>. "  \
-                    + f"The subtitle of this video is: <Subtitle>{subtitle}</Subtitle>. " \
-                    + f"Now, please answer my question based on all the provided information. {user_message} ###Assistant: "
-        elif face_or_frame == 'multiframe_audio_frame_text': # (multi, face, audio, text)
-            assert subtitle is not None
-            prompt = f"###Human: The audio and video merged info is: <Multi><MultiHere></Multi>. " \
-                    + f"The audio content is as follows: <Audio><AudioHere></Audio>. " \
-                    + f"Meanwhile, we uniformly sample raw frames from the video: <Video><FrameHere></Video>. "  \
-                    + f"The subtitle of this video is: <Subtitle>{subtitle}</Subtitle>. " \
-                    + f"Now, please answer my question based on all the provided information. {user_message} ###Assistant: "
-        elif face_or_frame == 'multiface_audio_face_frame_text': # (multi, frame, face, audio, text)
-            assert subtitle is not None
-            prompt = f"###Human: The audio and video merged info is: <Multi><MultiHere></Multi>. " \
-                    + f"The audio content is as follows: <Audio><AudioHere></Audio>. " \
-                    + f"Meanwhile, we uniformly sample raw frames from the video and extract faces from these frames: <Video><FaceHere></Video>. "  \
-                    + f"Meanwhile, we uniformly sample raw frames from the video: <Video><FrameHere></Video>. "  \
-                    + f"The subtitle of this video is: <Subtitle>{subtitle}</Subtitle>. " \
-                    + f"Now, please answer my question based on all the provided information. {user_message} ###Assistant: "
-        return prompt
+        parts = [] if skip_header else ["###Human: "]
+        for key in segment_keys:
+            if key == 'subtitle':
+                parts.append(self._PROMPT_SEGMENTS[key].format(subtitle=subtitle))
+            else:
+                parts.append(self._PROMPT_SEGMENTS[key])
+        parts.append(self._PROMPT_END.format(user_message=user_message))
+        return ''.join(parts)
     
-    ## 替换 <FaceHere> / <FrameHere> / <AudioHere> / <ImageHere> / <MultiToken>
     def replace_token_for_multimodal(self, prompt):
-
-        replace_token = config.DEFAULT_FRAME_PATCH_TOKEN * self.num_video_query_token
-        prompt = prompt.replace(config.DEFAULT_FRAME_PATCH_TOKEN, replace_token)
-        replace_token = config.DEFAULT_FACE_PATCH_TOKEN * self.num_video_query_token
-        prompt = prompt.replace(config.DEFAULT_FACE_PATCH_TOKEN, replace_token)
-        replace_token = config.DEFAULT_AUDIO_PATCH_TOKEN * self.num_audio_query_token
-        prompt = prompt.replace(config.DEFAULT_AUDIO_PATCH_TOKEN, replace_token)
-        replace_token = config.DEFAULT_MULTI_PATCH_TOKEN * self.num_multi_query_token
-        prompt = prompt.replace(config.DEFAULT_MULTI_PATCH_TOKEN, replace_token)
-        replace_token = config.DEFAULT_IMAGE_PATCH_TOKEN * self.num_image_query_token
-        prompt = prompt.replace(config.DEFAULT_IMAGE_PATCH_TOKEN, replace_token)
+        for token_attr, count_attr in [
+            (config.DEFAULT_FRAME_PATCH_TOKEN, 'num_video_query_token'),
+            (config.DEFAULT_FACE_PATCH_TOKEN,  'num_video_query_token'),
+            (config.DEFAULT_AUDIO_PATCH_TOKEN, 'num_audio_query_token'),
+            (config.DEFAULT_MULTI_PATCH_TOKEN, 'num_multi_query_token'),
+            (config.DEFAULT_IMAGE_PATCH_TOKEN, 'num_image_query_token'),
+        ]:
+            prompt = prompt.replace(token_attr, token_attr * getattr(self, count_attr))
         return prompt
 
 
