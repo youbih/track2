@@ -6,7 +6,7 @@
 source /work/2025/liusiyu/anaconda3/etc/profile.d/conda.sh
 conda activate vllm3
 
-cd /work/2025/liusiyu/track2_quality_gate
+cd /work/2025/liusiyu/track2
 export CUDA_VISIBLE_DEVICES=2
 
 python train.py \

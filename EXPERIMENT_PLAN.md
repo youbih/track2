@@ -1,29 +1,34 @@
-# Method A: Two-Stage Experiment Plan
-## Sample Quality Gating in CMEF for Multimodal Emotion Recognition
+# Method A: Two-Stage Training with Sample Quality Gating
+
+## Current Status: ALL CODE CHANGES IMPLEMENTED
+
+All modifications described in this plan are already in place in `/work/2025/liusiyu/track2`.
+The current running experiments (`method_a_stage1`, `method_a_stage1_qr`) are using this code.
 
 ---
 
 ## 1. Motivation
 
 ### Problem
-- MERCaptionPlus (machine-annotated) has large quantity (~27K) but noisy labels
-- Human (human-annotated) has high quality but small quantity (~1.5K)
+- `MERCaptionPlus` (machine-annotated): ~31K samples, large quantity but noisy labels
+- `Human` (human-annotated): ~1.5K samples, high quality but small quantity
 - Official MER2026 test set uses human annotation style
 
 ### Solution
-Two-stage training with sample quality gating:
+Two-stage training with sample quality gating in CMEF:
 - **Stage 1**: Learn robust fusion representations on mixed data with quality-aware weighting
 - **Stage 2**: Fine-tune LLM generation on human-only data
 
 ---
 
-## 2. Innovation: Sample Quality Gating
+## 2. Code Changes (Already Implemented)
 
-### Location
-`my_affectgpt/models/fusion_modules.py` - `CrossModalEmotionFusion`
+### 2.1 `my_affectgpt/models/fusion_modules.py`
 
-### Design
+**Change**: Added `quality_estimator` in `CrossModalEmotionFusion.__init__` (line 481-487)
+
 ```python
+# Sample quality estimator: per-sample audio/video quality gating
 self.quality_estimator = nn.Sequential(
     nn.Linear(hidden_dim * 2, hidden_dim),
     nn.GELU(),
@@ -32,254 +37,187 @@ self.quality_estimator = nn.Sequential(
 )
 ```
 
-### Forward Logic
+**Change**: Modified `CrossModalEmotionFusion.forward()` (line 583-595)
+- Returns `(fused, audio_proj, video_proj, quality_reg)` instead of just `fused`
+- Quality gating suppresses low-quality samples:
+  - High-quality -> `quality_scale` near 1.0
+  - Low-quality -> `quality_scale` near 0.0
+- Added `quality_reg` to prevent collapse to 1.0
+
 ```python
 audio_quality = torch.sigmoid(self.quality_estimator(
     torch.cat([audio.mean(dim=1), video.mean(dim=1)], dim=-1)
 ))  # [b, 2]
-sample_quality = audio_quality.mean(dim=-1, keepdim=True)
-quality_scale = sample_quality.unsqueeze(1)
+sample_quality = audio_quality.mean(dim=-1, keepdim=True)  # [b, 1]
+quality_scale = sample_quality.unsqueeze(1)  # [b, 1, 1]
 fused = fused * quality_scale
+
+quality_reg = ((quality_scale - 0.5) ** 2).mean()
+return fused, audio_proj, video_proj, quality_reg
 ```
 
-### Expected Behavior
-- High-quality samples (clear emotion signals) -> quality_scale close to 1.0
-- Low-quality samples (noisy or ambiguous) -> quality_scale close to 0.0
-- Human samples should get higher quality scores than machine-captioned samples
+### 2.2 `my_affectgpt/models/affectgpt.py`
+
+**Changes**:
+1. Added `frozen_cmef` parameter to `__init__` (line 96)
+2. Added CMEF freezing logic (line 331-334):
+   ```python
+   if frozen_cmef:
+       self._set_grad(True, [self.cmef_module], name="CMEF module")
+   else:
+       self._set_grad(False, [self.cmef_module], name="CMEF module")
+   ```
+3. Added `quality_reg_weight` parameter (line 119, 359)
+4. Modified `encode_multi_merge()` to unpack 4 return values (line 451-465)
+5. Added quality_reg loss in `forward()` (line 575-576):
+   ```python
+   if quality_reg is not None and self.quality_reg_weight > 0:
+       loss = loss + self.quality_reg_weight * quality_reg
+   ```
+6. Added `quality_reg_weight` to `from_config()` (line 630, 671)
+
+### 2.3 `my_affectgpt/datasets/builders/image_text_pair_builder.py`
+
+**Change**: Added `split_prefix` support (line 124-126)
+
+```python
+split_prefix = builder.dataset_cfg.get("split_prefix", "")
+if split_prefix:
+    datasets[f"{split_prefix}val"] = val_dataset
+```
+
+This creates prefixed validation splits like `machine_val` and `human_val`.
+
+### 2.4 Config Files
+
+| File | Purpose |
+|------|---------|
+| `train_configs/method_a_stage1.yaml` | Stage 1: mixed data, frozen LLM, train CMEF |
+| `train_configs/method_a_stage2.yaml` | Stage 2: human only, frozen CMEF, train LLM |
+
+### 2.5 Run Scripts
+
+| File | Purpose |
+|------|---------|
+| `run_method_a_stage1.sh` | Stage 1 runner |
+| `run_method_a_stage2.sh` | Stage 2 runner |
+
+**Note**: Run scripts currently reference `track2_quality_gate` path. Update to `track2` before running if needed.
 
 ---
 
-## 3. Three-Way Validation Strategy
+## 3. Stage 1 Configuration Summary
 
-### Rationale
-Previous experiments showed that adding human data hurts val performance on MERCaptionPlus val (p1b: 0.5753 vs baseline: 0.6473). However, the official test set is human-annotated. We need separate validation sets to monitor performance on different distributions.
-
-### Validation Sets
-| Split | Data Source | Purpose |
-|-------|------------|---------|
-| `machine_val` | MERCaptionPlus only | Monitor machine annotation distribution |
-| `human_val` | Human only | Monitor human annotation distribution (target) |
-| `val` | Combined (machine + human) | Overall performance |
-
-### Implementation
-Modified `image_text_pair_builder.py` to support `split_prefix`:
-```yaml
-mercaptionplus:
-  split_prefix: "machine_"  # Creates machine_val
-human:
-  split_prefix: "human_"    # Creates human_val
-```
-
-Both datasets also create standard `val` split which is automatically combined.
-
----
-
-## 4. Stage 1: Fusion Learning
-
-### Goal
-Learn good audio-visual fusion representations using mixed data (MERCaptionPlus + Human).
-
-### Data
-| Dataset | Size | Annotation | ratio | val_ratio |
-|---------|------|------------|-------|-----------|
-| MERCaptionPlus | ~27K | Machine | 1.0 | 0.1 (~2.7K val) |
-| Human | ~1.5K | Human | 1.0 | 0.15 (~230 val) |
-
-**Key change**: ratio=1.0 (p2b proved full data is better than 0.7)
-
-### Model Configuration
 | Parameter | Value | Rationale |
 |-----------|-------|-----------|
-| `frozen_llm` | True | Don't train LLM yet |
-| `frozen_cmef` | False | Train quality gating module |
-| `multi_fusion_type` | cmef | Core innovation |
-| `cmef_num_layers` | 2 | p2a validated 2 layers suffice |
-| `contrastive_weight` | 0.1 | Learn emotion prototypes |
-| `lora_r` | 8 | Lower rank for stage 1 |
-| `init_lr` | 5e-5 | Standard pretraining LR |
-| `max_epoch` | 12 | Full convergence |
+| `frozen_llm` | `True` | Don't train LLM yet |
+| `frozen_cmef` | `False` | Train quality gating module |
+| `multi_fusion_type` | `cmef` | Core innovation |
+| `cmef_num_layers` | `2` | p2a validated 2 layers suffice |
+| `contrastive_weight` | `0.1` | Learn emotion prototypes |
+| `lora_r` | `8` | Lower rank for stage 1 |
+| `init_lr` | `5e-5` | Standard pretraining LR |
+| `max_epoch` | `12` | Full convergence |
+| `ratio` (mercaptionplus) | `1.0` | p2b proved full data is better |
+| `ratio` (human) | `1.0` | All human samples |
 
-### What Gets Trained
+**Validation sets**: `val`, `machine_val`, `human_val`
+
+**What gets trained**:
 - CMEF module (with quality_estimator)
-- Multi Q-Former LLaMA projection
-- Audio/Video Q-Former projections
+- Multi/Audio/Video projection layers
 - LoRA adapters (rank 8)
 
-### What Gets Frozen
+**What gets frozen**:
 - LLM (Qwen2.5-7B)
 - Audio/Video encoders (HuBERT, CLIP)
 
-### Key Metrics to Monitor
-1. `val_wheel_f1` - Combined validation
-2. `machine_val_wheel_f1` - Machine annotation distribution
-3. `human_val_wheel_f1` - Human annotation distribution (most important)
-4. Quality score distribution (human vs machine-caption)
-
-### Checkpoint
-- Save best checkpoint based on best across all valid_splits
-- Path: `output/method_a_stage1/*/checkpoint_best.pth`
-
 ---
 
-## 5. Stage 2: LLM Generation Alignment
+## 4. Stage 2 Configuration Summary
 
-### Goal
-Fine-tune LLM to generate human-style emotion labels.
-
-### Data
-| Dataset | Size | Annotation | Usage |
-|---------|------|------------|-------|
-| Human | ~1.5K | Human | Only data source |
-
-### Model Configuration
 | Parameter | Value | Rationale |
 |-----------|-------|-----------|
-| `frozen_llm` | False | Fine-tune LLM |
-| `frozen_cmef` | True | Keep Stage 1 fusion frozen |
-| `multi_fusion_type` | cmef | Reuse learned fusion |
-| `contrastive_weight` | 0.0 | No contrastive, focus on generation |
-| `lora_r` | 16 | Higher rank for LLM adaptation |
-| `init_lr` | 1e-5 | Lower LR for fine-tuning |
-| `max_epoch` | 8 | Prevent overfitting on small data |
+| `frozen_llm` | `False` | Fine-tune LLM |
+| `frozen_cmef` | `True` | Keep Stage 1 fusion frozen |
+| `contrastive_weight` | `0.0` | No contrastive, focus on generation |
+| `lora_r` | `16` | Higher rank for LLM adaptation |
+| `init_lr` | `1e-5` | Lower LR for fine-tuning |
+| `max_epoch` | `8` | Prevent overfitting |
 
-### What Gets Trained
-- LLM with LoRA (rank 16, expanded from rank 8)
-- Multi Q-Former LLaMA projection
+**Data**: Human only (~1.5K)
 
-### What Gets Frozen
-- CMEF module (quality gating preserved from Stage 1)
-- Audio/Video encoders
-- Audio/Video Q-Formers
+**Validation sets**: `val`, `human_val`
 
-### Why Keep CMEF Frozen?
-- Stage 1 already learned good fusion representations
-- Freezing CMEF acts as a "feature extractor" for Stage 2
-- Reduces trainable parameters, preventing overfitting on 1.5K data
-
-### Checkpoint Loading
+**Checkpoint loading**:
 ```bash
-# Load Stage 1 best checkpoint
 CKPT_PATH="output/method_a_stage1/method_a_stage1_*/checkpoint_best.pth"
 ```
-Note: `strict=False` loading allows LoRA rank change (8 -> 16).
 
 ---
 
-## 6. Two-Stage Comparison
-
-| Dimension | Stage 1 | Stage 2 |
-|-----------|---------|---------|
-| Data | MERCaptionPlus + Human | Human only |
-| Goal | Learn fusion | Align generation |
-| LLM | Frozen | Unfrozen (LoRA) |
-| CMEF | Trained | Frozen |
-| LoRA rank | 8 | 16 |
-| Contrastive | 0.1 | 0.0 |
-| LR | 5e-5 | 1e-5 |
-| Epochs | 12 | 8 |
-| Validation | machine_val, human_val, val | human_val, val |
-
----
-
-## 7. Code Changes
-
-### 1. `my_affectgpt/models/fusion_modules.py`
-- Added `quality_estimator` in `CrossModalEmotionFusion.__init__`
-- Added quality gating in `forward`
-
-### 2. `my_affectgpt/models/affectgpt.py`
-- Added `frozen_cmef` parameter
-- Added freezing logic for CMEF module
-
-### 3. `my_affectgpt/datasets/builders/image_text_pair_builder.py`
-- Added `split_prefix` support
-- Creates prefixed val splits (e.g., `machine_val`, `human_val`)
-
-### Config Files
-- `train_configs/method_a_stage1.yaml` - Stage 1 with three validation sets
-- `train_configs/method_a_stage2.yaml` - Stage 2 with human validation
-
-### Run Scripts
-- `run_method_a_stage1.sh` - Stage 1 runner
-- `run_method_a_stage2.sh` - Stage 2 runner
-
----
-
-## 8. Execution Order
+## 5. Execution Steps
 
 ```bash
-# Step 1: Run Stage 1
+# Step 1: Fix run script path if needed
+sed -i 's/track2_quality_gate/track2/g' run_method_a_stage1.sh run_method_a_stage2.sh
+
+# Step 2: Run Stage 1
 bash run_method_a_stage1.sh
 
-# Step 2: Monitor three validation sets
-# Check: output/method_a_stage1/*/log.txt
+# Step 3: Monitor three validation metrics in output/method_a_stage1/*/log.txt
+#   - val_wheel_f1 (combined)
+#   - machine_val_wheel_f1 (machine distribution)
+#   - human_val_wheel_f1 (human distribution - PRIMARY)
 
-# Step 3: Identify best Stage 1 checkpoint
-# Best is saved automatically as checkpoint_best.pth
+# Step 4: Identify best Stage 1 checkpoint (saved as checkpoint_best.pth)
 
-# Step 4: Update Stage 2 script with checkpoint path
+# Step 5: Update Stage 2 script with actual checkpoint path
 vim run_method_a_stage2.sh  # Update CKPT_PATH
 
-# Step 5: Run Stage 2
+# Step 6: Run Stage 2
 bash run_method_a_stage2.sh
 ```
 
 ---
 
-## 9. Expected Results
+## 6. Key Metrics to Monitor
 
-### Stage 1
-- `human_val_wheel_f1` should be the primary metric (targets human distribution)
-- `machine_val_wheel_f1` may be lower than baseline due to human data mixing
-- Quality scores should distinguish human vs machine-caption
-- Loss should converge smoothly
-
-### Stage 2
-- Should improve `human_val_wheel_f1` over Stage 1
-- LLM output should match human annotation style better
-- Risk: Overfitting on 1.5K data (monitor early stopping)
+| Stage | Primary Metric | Secondary Metrics |
+|-------|---------------|-------------------|
+| Stage 1 | `human_val_wheel_f1` | `machine_val_wheel_f1`, `val_wheel_f1`, quality score distribution |
+| Stage 2 | `human_val_wheel_f1` | `val_wheel_f1`, overfitting signs |
 
 ---
 
-## 10. Risk & Mitigation
+## 7. Current Running Experiments
+
+| Experiment | Status | Config | GPU |
+|------------|--------|--------|-----|
+| `method_a_stage1` | Running | `method_a_stage1.yaml` | CUDA 2 |
+| `method_a_stage1_qr` | Running | Quality reg variant | CUDA 2 |
+
+Both are using the code changes described above.
+
+---
+
+## 8. Risks & Mitigations
 
 | Risk | Mitigation |
 |------|------------|
-| Stage 1 OOM | accum_grad_iters=16, batch_size=1 |
-| Stage 2 overfitting | early_stop_patience=6, max_epoch=8 |
+| Stage 1 OOM | `accum_grad_iters=16`, `batch_size=1` |
+| Stage 2 overfitting | `early_stop_patience=6`, `max_epoch=8` |
 | Quality gating collapses | Monitor quality score distribution |
-| Human data too small | Stage 1 already exposes model to human |
-| LoRA rank mismatch | strict=False loading handles this |
-| Multiple val sets confusion | human_val is primary for checkpoint |
+| LoRA rank mismatch | `strict=False` loading handles 8->16 transition |
 
 ---
 
-## 11. Files
+## 9. Modified Files Checklist
 
-```
-track2_quality_gate/
-├── my_affectgpt/
-│   ├── models/
-│   │   ├── fusion_modules.py      # Modified: quality_estimator
-│   │   └── affectgpt.py           # Modified: frozen_cmef
-│   └── datasets/builders/
-│       └── image_text_pair_builder.py  # Modified: split_prefix
-├── train_configs/
-│   ├── method_a_stage1.yaml       # Stage 1: three val sets
-│   └── method_a_stage2.yaml       # Stage 2: human only
-├── run_method_a_stage1.sh         # Stage 1 script
-├── run_method_a_stage2.sh         # Stage 2 script
-└── EXPERIMENT_PLAN.md             # This document
-```
-
----
-
-## 12. Next Steps
-
-1. [ ] Run Stage 1 experiment
-2. [ ] Monitor three validation metrics (machine_val, human_val, val)
-3. [ ] Analyze quality score distribution
-4. [ ] Identify best Stage 1 checkpoint
-5. [ ] Update Stage 2 script with checkpoint path
-6. [ ] Run Stage 2 experiment
-7. [ ] Compare Stage 2 human_val with baselines
+- [x] `my_affectgpt/models/fusion_modules.py` - quality_estimator + gating logic
+- [x] `my_affectgpt/models/affectgpt.py` - frozen_cmef + quality_reg loss
+- [x] `my_affectgpt/datasets/builders/image_text_pair_builder.py` - split_prefix
+- [x] `train_configs/method_a_stage1.yaml`
+- [x] `train_configs/method_a_stage2.yaml`
+- [x] `run_method_a_stage1.sh`
+- [x] `run_method_a_stage2.sh`
